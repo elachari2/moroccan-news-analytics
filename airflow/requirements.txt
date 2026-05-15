@@ -1,0 +1,13 @@
+apache-airflow-providers-postgres
+apache-airflow-providers-amazon
+pandas
+beautifulsoup4
+requests
+lxml
+psycopg2-binary
+minio
+pyarrow
+fastparquet
+langdetect
+textblob
+deep-translator

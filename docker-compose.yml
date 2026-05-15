@@ -1,0 +1,129 @@
+services:
+  # --- INFRASTRUCTURE BASE ---
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d news_dw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2023-10-24T04-42-36Z
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "cub kafka-ready -b kafka:9092 1 20"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # --- AIRFLOW (Batch & Orchestration) ---
+  airflow-init:
+    build: ./airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    entrypoint: /bin/bash
+    command: -c "airflow db init && airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@example.com --password admin"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    build: ./airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=secret_key
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./ingestion/scraper:/opt/airflow/scripts/scraper
+      - ./transformation:/opt/airflow/scripts/transformation
+    ports:
+      - "8080:8080"
+    command: webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    build: ./airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./ingestion/scraper:/opt/airflow/scripts/scraper
+      - ./transformation:/opt/airflow/scripts/transformation
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --- STREAMING ---
+  kafka-ingestion:
+    build: ./ingestion/kafka
+    environment:
+      - KAFKA_BROKER=${KAFKA_BROKER}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MINIO_BUCKET=${MINIO_BUCKET}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # --- VISUALIZATION ---
+  dashboard:
+    build: ./app_streamlit
+    environment:
+      - DB_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    volumes:
+      - ./app_streamlit:/app
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy

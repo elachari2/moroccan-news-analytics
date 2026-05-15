@@ -1,0 +1,124 @@
+# 🏗️ Architecture & Déploiement : Moroccan News Analytics
+
+Ce document détaille les choix architecturaux, les interactions entre services et la stratégie de déploiement de la plateforme.
+
+## 1. Vision Holistique (Modèle Medallion)
+
+La plateforme utilise une architecture Lakehouse moderne. Contrairement à un ETL classique, nous séparons le stockage (MinIO) du traitement (Airflow/Python) et de la consommation (Postgres/Streamlit).
+
+```mermaid
+graph TD
+    %% Sources
+    subgraph Sources ["  Sources de Données"]
+        H[Hespress]
+        A[Akhbarona]
+    end
+
+    %% Ingestion
+    subgraph Ingestion ["  Ingestion & Streaming"]
+        S[Python Scraper]
+        K[Kafka Producer]
+        KB[Kafka Broker / Zookeeper]
+        
+        H --> S
+        A --> S
+        S --> K
+        K --> KB
+    end
+
+    %% Storage
+    subgraph Storage ["  Data Lake (MinIO)"]
+        Bronze[(Bronze Layer \n JSON Bruts)]
+        Silver[(Silver Layer \n Parquet Nettoyé)]
+        
+        KB --> Bronze
+    end
+
+    %% Processing
+    subgraph Processing ["  Orchestration & Traitement"]
+        Airflow[Apache Airflow \n DAG Manager]
+        PE[Processing Engine \n NLP & Cleaning]
+        
+        Airflow -.-> S
+        Airflow -.-> PE
+        
+        Bronze --> PE
+        PE --> Silver
+    end
+
+    %% Warehouse
+    subgraph DWH ["  Data Warehouse (PostgreSQL)"]
+        Gold[(Gold Layer \n Analytics & Sentiment)]
+        
+        PE --> Gold
+    end
+
+    %% UI
+    subgraph Viz ["  Interface Utilisateur"]
+        Streamlit[Streamlit Dashboard \n Modern UI]
+        
+        Gold --> Streamlit
+    end
+
+    %% Styles
+    classDef source fill:#f1f5f9,stroke:#94a3b8,stroke-width:2px,color:#0f172a
+    classDef ingest fill:#e0f2fe,stroke:#38bdf8,stroke-width:2px,color:#0f172a
+    classDef minio fill:#fef08a,stroke:#eab308,stroke-width:2px,color:#0f172a
+    classDef process fill:#d8b4fe,stroke:#a855f7,stroke-width:2px,color:#0f172a
+    classDef pg fill:#bbf7d0,stroke:#22c55e,stroke-width:2px,color:#0f172a
+    classDef viz fill:#ffedd5,stroke:#f97316,stroke-width:2px,color:#0f172a
+
+    class H,A source;
+    class S,K,KB ingest;
+    class Bronze,Silver minio;
+    class Airflow,PE process;
+    class Gold pg;
+    class Streamlit viz;
+```
+
+---
+
+## 2. Analyse des Sous-Systèmes
+
+### A. Le Bus de Messages (Kafka)
+Pourquoi Kafka ? 
+Il sert de tampon (buffer) entre le scraping (parfois lent ou sujet à des erreurs réseau) et le stockage. Si MinIO est temporairement indisponible, Kafka conserve les messages, garantissant qu'aucune donnée n'est perdue (Zero Data Loss).
+
+### B. Le Data Lakehouse (MinIO + Parquet)
+Nous utilisons le format Parquet pour la couche Silver. 
+*   Avantages : Compression élevée (gain d'espace) et lecture colonnaire (gain de performance pour les calculs analytiques).
+
+### C. L'Intelligence Artificielle (NLP Engine)
+Le moteur de traitement ne se contente pas de nettoyer le texte. Il applique :
+1.  Sentiment Analysis : Classification automatique en Positif/Négatif/Neutre.
+2.  Dédoublonnage : Utilisation de hash MD5 sur les URLs pour éviter d'analyser deux fois le même article.
+
+---
+
+## 3. Topologie Réseau Docker
+
+L'ensemble des services communique via un réseau Docker interne isolé. 
+
+*   Isolation : Seuls les ports 8080 (Airflow), 8501 (Streamlit) et 9001 (MinIO) sont exposés à l'hôte pour garantir la sécurité.
+*   DNS Interne : Les services se parlent via leur nom (ex: `postgres:5432` au lieu d'une IP), ce qui facilite la portabilité.
+
+---
+
+## 4. Stratégie de Déploiement & Mise à l'Échelle
+
+### Local (Docker Compose)
+Idéal pour le développement et les démonstrations. Orchestre 8 services avec gestion des dépendances (`depends_on`) et des healthchecks pour s'assurer que la DB est prête avant de lancer Airflow.
+
+### Production (Kubernetes / Cloud)
+Pour passer à l'échelle supérieure :
+*   Helm Charts : Utilisation de Helm pour gérer les déploiements complexes.
+*   Horizontal Pod Autoscaler (HPA) : Permet d'augmenter le nombre de scrapers automatiquement si le volume d'actualités explose (ex: période électorale).
+*   Cloud Storage : Remplacement de MinIO par AWS S3 ou Google Cloud Storage sans changer une seule ligne de code (grâce à la compatibilité S3).
+
+---
+
+## 5. Design UI (Streamlit)
+
+Le Dashboard a été conçu avec une approche Glassmorphism :
+*   Esthétique : Couleurs vibrantes, flous d'arrière-plan et cartes translucides.
+*   Interactivité : Filtres par date et par source mis à jour en temps réel via des connexions directes au Data Warehouse.
